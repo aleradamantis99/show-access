@@ -19,8 +19,7 @@ def parse_arguments():
     SecondTargetGroup.add_argument("-g", "--gateway", action="store_true", dest="UseGateway", help="Use gateway as B (target2)") 
     
     AttackArguments = parser.add_argument_group("Attack modes")
-    AttackArguments.add_argument ("-D", "--DNS", help="Blocks all traffic and only shows DNS requests")
-    AttackArguments.add_argument ("-M", "--MITM", help="Performs MITM")
+    AttackArguments.add_argument ("-R", "--RDNS", action="store_true", help="Performs rDNS Lookups and prints domain names")
     
     
     parser.add_argument("-o", "--oneway", action="store_true", help="Poison A (target1) only")
